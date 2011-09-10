@@ -2,21 +2,26 @@ package AI::ParticleSwarmOptimization;
 
 use strict;
 use warnings;
-use Math::Random::MT qw(srand rand);
+use Math::Random::MT qw();
 
 require Exporter;
 
 our @ISA     = qw(Exporter);
 our @EXPORT  = qw();
-our $VERSION = '1.003';
+our $VERSION = '1.004';
 
+use constant kLogBetter     => 1;
+use constant kLogStall      => 2;
+use constant kLogIter       => 4;
+use constant kLogDetail     => 8;
+use constant kLogIterDetail => (kLogIter | kLogDetail);
 
 sub new {
     my ($class, %params) = @_;
     my $self = bless {}, $class;
 
     $self->setParams (%params);
-    srand ($self->{randSeed});
+    Math::Random::MT::srand () if ! exists $self->{randSeed};
     return $self;
 }
 
@@ -27,7 +32,7 @@ sub setParams {
     if (defined $params{-fitFunc}) {
         # Process required parameters - -fitFunc and -dimensions
         if ('ARRAY' eq ref $params{-fitFunc}) {
-            ($self->{fitFunc}, @{$self->{fitParams}}) = @{$params{-fitFunc}}
+            ($self->{fitFunc}, @{$self->{fitParams}}) = @{$params{-fitFunc}};
         } else {
             $self->{fitFunc} = $params{-fitFunc};
         }
@@ -35,20 +40,18 @@ sub setParams {
         $self->{fitParams} ||= [];
     }
 
-    $self->{prtcls} = [] # Need to reinit if num dimensions changed
-        if  defined $params{-dimensions}
-        and defined $self->{dimensions}
-        and $params{-dimensions} != $self->{dimensions};
+    $self->{prtcls} = []    # Need to reinit if num dimensions changed
+        if defined $params{-dimensions}
+            and defined $self->{dimensions}
+            and $params{-dimensions} != $self->{dimensions};
 
-    srand ($self->{randSeed}) # Need to reseed if seed changed
-        if  defined $params{-randSeed}
-        and defined $self->{randSeed}
-        and $params{-randSeed} != $self->{randSeed};
-
-    $self->{$_} = $params{"-$_"} for grep {exists $params{"-$_"}}
-        qw/
+    $self->{$_} = $params{"-$_"} for grep {exists $params{"-$_"}} qw/
         dimensions
         exitFit
+        exitPlateau
+        exitPlateauDP
+        exitPlateauWindow
+        exitPlateauBurnin
         inertia
         iterations
         meWeight
@@ -64,18 +67,37 @@ sub setParams {
         /;
 
     die "-dimensions must be greater than 0\n"
-        unless ! exists $params{-dimensions} or $params{-dimensions} > 0;
+        if exists $params{-dimensions} && $params{-dimensions} <= 0;
 
-    $self->{numParticles}   ||= $self->{dimensions} * 10 if defined $self->{dimensions};
-    $self->{numNeighbors}   ||= int sqrt $self->{numParticles} if defined $self->{numParticles};
-    $self->{iterations}     ||= 1000;
-    $self->{posMax}         = 100 unless defined $self->{posMax};
-    $self->{posMin}         = -$self->{posMax} unless defined $self->{posMin};
-    $self->{meWeight}       ||= 0.5;
-    $self->{themWeight}     ||= 0.5;
-    $self->{inertia}        ||= 0.9;
-    $self->{randSeed}       = rand (0xffffffff) unless defined $self->{randSeed};
-    $self->{verbose}        ||= 0;
+    if (defined $self->{verbose} and 'ARRAY' eq ref $self->{verbose}) {
+        my @log = map {lc} @{$self->{verbose}};
+        my %logTypes = (
+            better => kLogBetter,
+            stall  => kLogStall,
+            iter   => kLogIter,
+            detail => kLogDetail,
+        );
+
+        $self->{verbose} = 0;
+        exists $logTypes{$_} and $self->{verbose} |= $logTypes{$_} for @log;
+    }
+
+    $self->{numParticles} ||= $self->{dimensions} * 10
+        if defined $self->{dimensions};
+    $self->{numNeighbors} ||= int sqrt $self->{numParticles}
+        if defined $self->{numParticles};
+    $self->{iterations}        ||= 1000;
+    $self->{exitPlateauDP}     ||= 10;
+    $self->{exitPlateauWindow} ||= $self->{iterations} * 0.1;
+    $self->{exitPlateauBurnin} ||= $self->{iterations} * 0.5;
+    $self->{posMax} = 100 unless defined $self->{posMax};
+    $self->{posMin} = -$self->{posMax} unless defined $self->{posMin};
+    $self->{meWeight}   ||= 0.5;
+    $self->{themWeight} ||= 0.5;
+    $self->{inertia}    ||= 0.9;
+    $self->{randSeed} = Math::Random::MT::rand (0xffffffff)
+        if ! defined $self->{randSeed};
+    $self->{verbose} ||= 0;
 
     return 1;
 }
@@ -86,16 +108,22 @@ sub init {
 
     die "-fitFunc must be set before init or optimize is called"
         unless $self->{fitFunc} and 'CODE' eq ref $self->{fitFunc};
-    die "-dimensions must be set to 1 or greater before init or optimize is called"
+    die
+        "-dimensions must be set to 1 or greater before init or optimize is called"
         unless $self->{dimensions} and $self->{dimensions} >= 1;
 
-    $self->{prtcls} = [];
-    $self->{bestBest} = undef;
+    Math::Random::MT::srand ($self->{randSeed}) if exists $self->{randSeed};
+    print Math::Random::MT::rand, "\n";
+    $self->{prtcls}         = [];
+    $self->{bestBest}       = undef;
+    $self->{bestBestByIter} = undef;
+    $self->{bestsMean}      = 0;
     $self->_initParticles ();
     $self->{iterCount} = 0;
 
     # Normalise weights.
-    my $totalWeight = $self->{inertia} + $self->{themWeight} + $self->{meWeight};
+    my $totalWeight =
+        $self->{inertia} + $self->{themWeight} + $self->{meWeight};
 
     $self->{inertia}    /= $totalWeight;
     $self->{meWeight}   /= $totalWeight;
@@ -103,8 +131,7 @@ sub init {
 
     die "-posMax must be greater than -posMin"
         unless $self->{posMax} > $self->{posMin};
-    $self->{$_} > 0 or die "-$_ must be greater then 0"
-        for qw/numParticles/;
+    $self->{$_} > 0 or die "-$_ must be greater then 0" for qw/numParticles/;
 
     $self->{deltaMax} = ($self->{posMax} - $self->{posMin}) / 100.0;
 
@@ -199,6 +226,28 @@ sub _swarm {
         last if defined $self->_moveParticles ($iter);
 
         $self->_updateVelocities ($iter);
+        next if !$self->{exitPlateau};
+
+        if (defined ($self->{bestBest})
+            && $iter >= $self->{exitPlateauBurnin} - $self->{exitPlateauWindow})
+        {
+            my $i = $iter % $self->{exitPlateauWindow};
+
+            $self->{bestsMean} -= $self->{bestBestByIter}[$i]
+                if defined $self->{bestBestByIter}[$i];
+            $self->{bestsMean} += $self->{bestBestByIter}[$i] =
+                $self->{bestBest} / $self->{exitPlateauWindow};
+        }
+
+        next if $iter <= $self->{exitPlateauBurnin};
+
+        #Round to the specified number of d.p.
+        my $format  = "%.$self->{exitPlateauDP}f";
+        my $mean    = sprintf $format, $self->{bestsMean};
+        my $current = sprintf $format, $self->{bestBest};
+
+        #Check if there is a sufficient plateau - stopping iterations if so
+        last if $mean == $current;
     }
 
     return $self->{bestBest};
@@ -208,7 +257,7 @@ sub _swarm {
 sub _moveParticles {
     my ($self, $iter) = @_;
 
-    print "Iter $iter\n" if $self->{verbose} >= 2;
+    print "Iter $iter\n" if $self->{verbose} & kLogIter;
 
     for my $prtcl (@{$self->{prtcls}}) {
         @{$prtcl->{currPos}} = @{$prtcl->{nextPos}};
@@ -223,17 +272,17 @@ sub _moveParticles {
 
         return $fit if defined $self->{exitFit} and $fit < $self->{exitFit};
 
-        next unless $self->{verbose} >= 2;
+        next unless ($self->{verbose} & kLogIterDetail) == kLogIterDetail;
         printf "Part %3d fit %8.2f", $prtcl->{id}, $fit
             if $self->{verbose} >= 2;
         printf " (%s @ %s)",
             join (', ', map {sprintf '%5.3f', $_} @{$prtcl->{velocity}}),
             join (', ', map {sprintf '%5.2f', $_} @{$prtcl->{currPos}})
-            if $self->{verbose} >= 3;
+            if $self->{verbose} & kLogDetail;
         print "\n";
     }
 
-    return undef;
+    return;
 }
 
 
@@ -244,25 +293,24 @@ sub _saveBest {
     @{$prtcl->{bestPos}} = @{$prtcl->{currPos}};
 
     $prtcl->{bestFit} = $fit;
-    if ($self->_betterFit ($fit, $self->{bestBest})) {
-        if ($self->{verbose} >= 1) {
-            my $velSq;
+    return if !$self->_betterFit ($fit, $self->{bestBest});
 
-            $velSq += $_ ** 2 for @{$prtcl->{velocity}};
+    if ($self->{verbose} & kLogBetter) {
+        my $velSq;
 
-            printf "#%05d: Particle $prtcl->{id} best: %.4f (vel: %.3f)\n",
-                $iter, $fit, sqrt ($velSq)
-        }
-
-        $self->{bestBest} = $fit;
+        $velSq += $_**2 for @{$prtcl->{velocity}};
+        printf "#%05d: Particle $prtcl->{id} best: %.4f (vel: %.3f)\n",
+            $iter, $fit, sqrt ($velSq);
     }
+
+    $self->{bestBest} = $fit;
 }
 
 
 sub _betterFit {
     my ($self, $new, $old) = @_;
 
-    return ! defined ($old) || ($new < $old);
+    return !defined ($old) || ($new < $old);
 }
 
 
@@ -277,20 +325,21 @@ sub _updateVelocities {
             my $meFactor = _randInRange (-$self->{meWeight}, $self->{meWeight});
             my $themFactor =
                 _randInRange (-$self->{themWeight}, $self->{themWeight});
-            my $meDelta = $prtcl->{bestPos}[$d] - $prtcl->{currPos}[$d];
+            my $meDelta   = $prtcl->{bestPos}[$d] - $prtcl->{currPos}[$d];
             my $themDelta = $bestN->{bestPos}[$d] - $prtcl->{currPos}[$d];
 
             $prtcl->{velocity}[$d] =
-                  $prtcl->{velocity}[$d] * $self->{inertia}
-                + $meFactor * $meDelta
-                + $themFactor * $themDelta;
-            $velSq += $prtcl->{velocity}[$d] ** 2;
+                $prtcl->{velocity}[$d] * $self->{inertia} +
+                $meFactor * $meDelta +
+                $themFactor * $themDelta;
+            $velSq += $prtcl->{velocity}[$d]**2;
         }
 
-        if (! $velSq or $self->{stallSpeed} and $velSq <= $self->{stallSpeed}) {
+        my $vel = sqrt ($velSq);
+        if (!$vel or $self->{stallSpeed} and $vel <= $self->{stallSpeed}) {
             $self->_initParticle ($prtcl);
-            printf "#%05d: Particle $prtcl->{id} stalled\n", $iter
-                if $self->{verbose} > 1;
+            printf "#%05d: Particle $prtcl->{id} stalled (%6f)\n", $iter, $vel
+                if $self->{verbose} & kLogStall;
         }
 
         $self->_calcNextPos ($prtcl);
@@ -318,7 +367,7 @@ sub _calcNextPos {
 
 sub _randInRange {
     my ($min, $max) = @_;
-    return $min + rand ($max - $min);
+    return $min + Math::Random::MT::rand ($max - $min);
 }
 
 
@@ -379,7 +428,8 @@ AI::ParticleSwarmOptimization - Particle Swarm Optimization (object oriented)
 The Particle Swarm Optimization technique uses communication of the current best
 position found between a number of particles moving over a hyper surface as a
 technique for locating the best location on the surface (where 'best' is the
-minimum of some fitness function).
+minimum of some fitness function). For a Wikipedia discussion of PSO see
+http://en.wikipedia.org/wiki/Particle_swarm_optimization.
 
 This pure Perl module is an implementation of the Particle Swarm Optimization
 technique for finding minima of hyper surfaces. It presents an object oriented
@@ -411,13 +461,13 @@ The number of dimensions of the hypersurface being searched.
 
 =item I<-exitFit>: number, optional
 
-If provided I<-exitFit> specifies allows an early termination of optimize if the
+If provided I<-exitFit> allows early termination of optimize if the
 fitness value becomes equal or less than I<-exitFit>.
 
 =item I<-fitFunc>: required
 
 I<-fitFunc> is a reference to the fitness function used by the search. If extra
-parameters need to be passed to the fitness function and array ref may be used
+parameters need to be passed to the fitness function an array ref may be used
 with the code ref as the first array element and parameters to be passed into
 the fitness function as following elements. User provided parameters are passed
 as the first parameters to the fitness function when it is called:
@@ -504,6 +554,35 @@ next iterations velocity. Defaults to 0.5.
 
 See also I<-inertia> and I<-meWeight>.
 
+=item I<-exitPlateau>: boolean, optional
+
+Set true to have the optimization check for plateaus (regions where the fit
+hasn't improved much for a while) during the search. The optimization ends when
+a suitable plateau is detected following the burn in period.
+
+Defaults to undefined (option disabled).
+
+item I<-exitPlateauDP>: number, optional
+
+Specify the number of decimal places to compare between the current fitness
+function value and the mean of the previous I<-exitPlateauWindow> values.
+
+Defaults to 10.
+
+item I<-exitPlateauWindow>: number, optional
+
+Specify the size of the window used to calculate the mean for comparison to
+the current output of the fitness function.  Correlates to the minimum size of a
+plateau needed to end the optimization.
+
+Defaults to 10% of the number of iterations (I<-iterations>).
+
+item I<-exitPlateauBurnin>: number, optional
+
+Determines how many iterations to run before checking for plateaus.
+
+Defaults to 50% of the number of iterations (I<-iterations>).
+
 =item I<-verbose>: number, optional
 
 If set to a non-zero value I<-verbose> determines the level of diagnostic print
@@ -525,6 +604,10 @@ to B<optimize ()> if it hasn't already been called.
 
 Runs the minimization optimization. Returns the fit value of the best fit
 found. The best possible fit is negative infinity.
+
+B<optimize ()> may be called repeatedly to continue the fitting process. The fit
+processing on each subsequent call will continue from where the last call left
+off.
 
 =item B<getParticleState ()>
 
@@ -555,8 +638,8 @@ been made.
 =head1 BUGS
 
 Please report any bugs or feature requests to
-C<bug-AI-PSO-OO at rt.cpan.org>, or through the web interface at
-L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=AI-PSO-OO>.
+C<bug-AI-ParticleSwarmOptimization at rt.cpan.org>, or through the web interface at
+L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=AI-ParticleSwarmOptimization>.
 I will be notified, and then you'll automatically be notified of progress on
 your bug as I make changes.
 
@@ -569,19 +652,19 @@ of assistance:
 
 =item * AnnoCPAN: Annotated CPAN documentation
 
-L<http://annocpan.org/dist/AI-PSO-OO>
+L<http://annocpan.org/dist/AI-ParticleSwarmOptimization>
 
 =item * CPAN Ratings
 
-L<http://cpanratings.perl.org/d/AI-PSO-OO>
+L<http://cpanratings.perl.org/d/AI-ParticleSwarmOptimization>
 
 =item * RT: CPAN's request tracker
 
-L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=AI-PSO-OO>
+L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=AI-ParticleSwarmOptimization>
 
 =item * Search CPAN
 
-L<http://search.cpan.org/dist/AI-PSO-OO>
+L<http://search.cpan.org/dist/AI-ParticleSwarmOptimization>
 
 =back
 
@@ -592,6 +675,8 @@ http://en.wikipedia.org/wiki/Particle_swarm_optimization
 =head1 ACKNOWLEDGEMENTS
 
 This module is an evolution of the AI::PSO module created by Kyle Schlansker.
+
+Plateau management code added in version 1.004 contributed by Kevin Balbi.
 
 =head1 AUTHOR
 

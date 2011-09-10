@@ -18,9 +18,10 @@ for (0 .. 9) {
     my $fitValue      = $pso->optimize ();
     my ($best)        = $pso->getBestParticles (1);
     my ($fit, @values) = $pso->getParticleBestPos ($best);
+    my $iters = $pso->getIterationCount();
 
-    printf "Fit %.4f at (%s)\n",
-        $fit, join ', ', map {sprintf '%.4f', $_} @values;
+    printf "Fit %.4f at (%s) after %d iterations\n",
+        $fit, join (', ', map {sprintf '%.4f', $_} @values), $iters;
 }
 
 

@@ -11,7 +11,5 @@ WriteMakefile(
     ABSTRACT     => 'OO Perl implementation of Particle Swarm Optimization',
     PREREQ_PM    => {
         'Math::Random::MT' => 0,
-        'Test::Pod::Coverage' => 0,
-        'Test::Pod' => 0,
     },
 );
