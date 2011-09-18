@@ -13,3 +13,8 @@ Revision history for Perl module Win32::MSI::HighLevel
 1.004
     - call srand in init if -seedRand value was provided
     - added plateau early exit code contributed by Kevin Balbi
+
+1.005
+    - Remove POD test files from distribution
+    - Remove bogus print left over from dev testing
+    - Fix possible undef warning

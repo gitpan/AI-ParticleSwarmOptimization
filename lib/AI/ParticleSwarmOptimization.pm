@@ -8,7 +8,7 @@ require Exporter;
 
 our @ISA     = qw(Exporter);
 our @EXPORT  = qw();
-our $VERSION = '1.004';
+our $VERSION = '1.005';
 
 use constant kLogBetter     => 1;
 use constant kLogStall      => 2;
@@ -21,7 +21,6 @@ sub new {
     my $self = bless {}, $class;
 
     $self->setParams (%params);
-    Math::Random::MT::srand () if ! exists $self->{randSeed};
     return $self;
 }
 
@@ -95,9 +94,7 @@ sub setParams {
     $self->{meWeight}   ||= 0.5;
     $self->{themWeight} ||= 0.5;
     $self->{inertia}    ||= 0.9;
-    $self->{randSeed} = Math::Random::MT::rand (0xffffffff)
-        if ! defined $self->{randSeed};
-    $self->{verbose} ||= 0;
+    $self->{verbose}    ||= 0;
 
     return 1;
 }
@@ -112,8 +109,12 @@ sub init {
         "-dimensions must be set to 1 or greater before init or optimize is called"
         unless $self->{dimensions} and $self->{dimensions} >= 1;
 
-    Math::Random::MT::srand ($self->{randSeed}) if exists $self->{randSeed};
-    print Math::Random::MT::rand, "\n";
+    my $seed =
+        int (exists $self->{randSeed} ? $self->{randSeed} : rand (0xffffffff));
+
+    $self->{rndGen} = Math::Random::MT->new ($seed);
+    $self->{usedRandSeed} = $seed;
+
     $self->{prtcls}         = [];
     $self->{bestBest}       = undef;
     $self->{bestBestByIter} = undef;
@@ -176,6 +177,13 @@ sub getIterationCount {
 }
 
 
+sub getSeed {
+    my ($self) = @_;
+
+    return $self->{usedRandSeed};
+}
+
+
 sub _initParticles {
     my ($self) = @_;
 
@@ -192,11 +200,12 @@ sub _initParticle {
     # each particle is a hash of arrays with the array sizes being the
     # dimensionality of the problem space
     for my $d (0 .. $self->{dimensions} - 1) {
-        $prtcl->{currPos}[$d] = _randInRange ($self->{posMin}, $self->{posMax});
+        $prtcl->{currPos}[$d] =
+            $self->_randInRange ($self->{posMin}, $self->{posMax});
 
         $prtcl->{velocity}[$d] =
-            $self->{randStartVelocity}
-            ? _randInRange (-$self->{deltaMax}, $self->{deltaMax})
+              $self->{randStartVelocity}
+            ? $self->_randInRange (-$self->{deltaMax}, $self->{deltaMax})
             : 0;
     }
 
@@ -204,7 +213,8 @@ sub _initParticle {
     $self->_calcNextPos ($prtcl);
 
     unless (defined $prtcl->{bestFit}) {
-        $prtcl->{bestPos}[$_] = _randInRange ($self->{posMin}, $self->{posMax})
+        $prtcl->{bestPos}[$_] =
+            $self->_randInRange ($self->{posMin}, $self->{posMax})
             for 0 .. $self->{dimensions} - 1;
         $prtcl->{bestFit} = $self->_calcPosFit ($prtcl->{bestPos});
     }
@@ -226,11 +236,9 @@ sub _swarm {
         last if defined $self->_moveParticles ($iter);
 
         $self->_updateVelocities ($iter);
-        next if !$self->{exitPlateau};
+        next if !$self->{exitPlateau} || !defined $self->{bestBest};
 
-        if (defined ($self->{bestBest})
-            && $iter >= $self->{exitPlateauBurnin} - $self->{exitPlateauWindow})
-        {
+        if ($iter >= $self->{exitPlateauBurnin} - $self->{exitPlateauWindow}) {
             my $i = $iter % $self->{exitPlateauWindow};
 
             $self->{bestsMean} -= $self->{bestBestByIter}[$i]
@@ -271,8 +279,8 @@ sub _moveParticles {
         }
 
         return $fit if defined $self->{exitFit} and $fit < $self->{exitFit};
+        next if !($self->{verbose} & kLogIterDetail);
 
-        next unless ($self->{verbose} & kLogIterDetail) == kLogIterDetail;
         printf "Part %3d fit %8.2f", $prtcl->{id}, $fit
             if $self->{verbose} >= 2;
         printf " (%s @ %s)",
@@ -282,7 +290,7 @@ sub _moveParticles {
         print "\n";
     }
 
-    return;
+    return undef;
 }
 
 
@@ -322,9 +330,10 @@ sub _updateVelocities {
         my $velSq;
 
         for my $d (0 .. $self->{dimensions} - 1) {
-            my $meFactor = _randInRange (-$self->{meWeight}, $self->{meWeight});
+            my $meFactor =
+                $self->_randInRange (-$self->{meWeight}, $self->{meWeight});
             my $themFactor =
-                _randInRange (-$self->{themWeight}, $self->{themWeight});
+                $self->_randInRange (-$self->{themWeight}, $self->{themWeight});
             my $meDelta   = $prtcl->{bestPos}[$d] - $prtcl->{currPos}[$d];
             my $themDelta = $bestN->{bestPos}[$d] - $prtcl->{currPos}[$d];
 
@@ -366,8 +375,8 @@ sub _calcNextPos {
 
 
 sub _randInRange {
-    my ($min, $max) = @_;
-    return $min + Math::Random::MT::rand ($max - $min);
+    my ($self, $min, $max) = @_;
+    return $min + $self->{rndGen}->rand ($max - $min);
 }
 
 
@@ -562,14 +571,14 @@ a suitable plateau is detected following the burn in period.
 
 Defaults to undefined (option disabled).
 
-item I<-exitPlateauDP>: number, optional
+=item I<-exitPlateauDP>: number, optional
 
 Specify the number of decimal places to compare between the current fitness
 function value and the mean of the previous I<-exitPlateauWindow> values.
 
 Defaults to 10.
 
-item I<-exitPlateauWindow>: number, optional
+=item I<-exitPlateauWindow>: number, optional
 
 Specify the size of the window used to calculate the mean for comparison to
 the current output of the fitness function.  Correlates to the minimum size of a
@@ -577,23 +586,50 @@ plateau needed to end the optimization.
 
 Defaults to 10% of the number of iterations (I<-iterations>).
 
-item I<-exitPlateauBurnin>: number, optional
+=item I<-exitPlateauBurnin>: number, optional
 
 Determines how many iterations to run before checking for plateaus.
 
 Defaults to 50% of the number of iterations (I<-iterations>).
 
-=item I<-verbose>: number, optional
+=item I<-verbose>: flags, optional
 
 If set to a non-zero value I<-verbose> determines the level of diagnostic print
 reporting that is generated during optimization.
+
+The following constants may be bitwise ored together to set logging options:
+
+=over 4
+
+=item * kLogBetter
+
+prints particle details when its fit becomes bebtter than its previous best.
+
+=item * kLogStall
+
+prints particle details when its velocity reaches 0 or falls below the stall
+threshold.
+
+=item * kLogIter
+
+Shows the current iteration number.
+
+=item * kLogDetail
+
+Shows additional details for some of the other logging options.
+
+=item * kLogIterDetail
+
+Shorthand for C<kLogIter | kLogIterDetail>
+
+=back
 
 =back
 
 =item B<setParams (%parameters)>
 
-Set or change optimization parameters. See I<-new> above for a description of the
-parameters that may be supplied.
+Set or change optimization parameters. See I<-new> above for a description of
+the parameters that may be supplied.
 
 =item B<init ()>
 
@@ -617,8 +653,8 @@ Returns the vector of position
 
 Takes an optional count.
 
-Returns a list containing the best $n prtcl numbers. If $n is not specified only
-the best prtcl number is returned.
+Returns a list containing the best $n particle numbers. If $n is not specified
+only the best particle number is returned.
 
 =item B<getParticleBestPos ($particleNum)>
 
@@ -637,8 +673,8 @@ been made.
 
 =head1 BUGS
 
-Please report any bugs or feature requests to
-C<bug-AI-ParticleSwarmOptimization at rt.cpan.org>, or through the web interface at
+Please report any bugs or feature requests to C<bug-AI-ParticleSwarmOptimization
+at rt.cpan.org>, or through the web interface at
 L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=AI-ParticleSwarmOptimization>.
 I will be notified, and then you'll automatically be notified of progress on
 your bug as I make changes.
@@ -686,10 +722,10 @@ Plateau management code added in version 1.004 contributed by Kevin Balbi.
 
 =head1 COPYRIGHT AND LICENSE
 
-This program is free software; you can redistribute
-it and/or modify it under the same terms as Perl itself.
+This program is free software; you can redistribute it and/or modify it under
+the same terms as Perl itself.
 
-The full text of the license can be found in the
-LICENSE file included with this module.
+The full text of the license can be found in the LICENSE file included with this
+module.
 
 =cut

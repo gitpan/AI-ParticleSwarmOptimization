@@ -16,7 +16,7 @@ BEGIN {
     use lib '../lib';    # For development testing
     use AI::ParticleSwarmOptimization;
 
-    plan (tests => 27);
+    plan (tests => 28);
     use_ok ("AI::ParticleSwarmOptimization");
 }
 
@@ -57,8 +57,33 @@ ok (
     '-posMax > -posMin'
    );
 
+# Calculation tests.
+$pso = AI::ParticleSwarmOptimization->new (
+    -randSeed          => 2626813951,# Fit 0.00006 at (-1.0051, -0.0005, 1.0058) after 258 iterations
+    -fitFunc           => \&calcFit,
+    -dimensions        => 3,
+    -iterations        => 500,
+    -exitPlateau       => 1,
+    -exitPlateauDP     => 3,
+    -exitPlateauBurnin => 100,
+    -exitPlateauWindow => 60,
+);
+my $fitValue = $pso->optimize ();
+my $iters = $pso->getIterationCount ();
+
+ok ($iters > 100 && $iters < 350, 'Low plateau ok');
 
 sub fitFunc {
+}
+
+
+sub calcFit {
+    my @values = @_;
+    my $offset = int (-@values / 2);
+    my $sum;
+
+    $sum += ($_ - $offset++)**2 for @values;
+    return $sum;
 }
 
 
