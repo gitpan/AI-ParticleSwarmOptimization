@@ -1,7 +1,7 @@
 Changes
 lib/AI/ParticleSwarmOptimization.pm
 LICENSE
-Makefile.pl
+Makefile.PL
 MANIFEST
 README
 Samples/PSOPlatTest.pl

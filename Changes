@@ -18,3 +18,6 @@ Revision history for Perl module Win32::MSI::HighLevel
     - Remove POD test files from distribution
     - Remove bogus print left over from dev testing
     - Fix possible undef warning
+
+1.006
+    - Fix Makefile.pl / Makefile.PL issue that caused *nix installs to fail!

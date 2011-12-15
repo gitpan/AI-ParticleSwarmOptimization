@@ -1,6 +1,9 @@
+#!/usr/bin/perl
 use strict;
 use warnings;
 use Test::More;
+use lib '../lib';    # For development testing
+use AI::ParticleSwarmOptimization;
 
 =head1 NAME
 
@@ -12,13 +15,7 @@ Test AI::ParticleSwarmOptimization
 
 =cut
 
-BEGIN {
-    use lib '../lib';    # For development testing
-    use AI::ParticleSwarmOptimization;
-
-    plan (tests => 28);
-    use_ok ("AI::ParticleSwarmOptimization");
-}
+plan (tests => 27);
 
 ok (my $pso = AI::ParticleSwarmOptimization->new (), 'Constructor');
 mustDie ('$pso->setParams (-fitFunc => 1)', 'Bad -fitFunc');

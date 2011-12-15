@@ -8,7 +8,7 @@ require Exporter;
 
 our @ISA     = qw(Exporter);
 our @EXPORT  = qw();
-our $VERSION = '1.005';
+$AI::ParticleSwarmOptimization::VERSION = '1.006';
 
 use constant kLogBetter     => 1;
 use constant kLogStall      => 2;
